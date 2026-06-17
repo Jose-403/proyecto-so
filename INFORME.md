@@ -122,9 +122,12 @@ Se registró el **estado en reposo** (sin carga activa) como línea base antes d
 | Locks PostgreSQL | 0 |
 | Latencia p95 `/api/health` | 12 ms |
 
-*Fig. 1. htop en reposo — load average 0,42, procesos `node` y `postgres` con consumo mínimo. [INSERTAR: captura-03-htop-reposo.png]*
 
-*Fig. 2. Dashboard en reposo — CPU 8,2 %, RAM 4,2 GB, 3 conexiones PG. [INSERTAR: captura-05-dashboard-reposo.png]*
+<img width="1237" height="920" alt="T1" src="https://github.com/user-attachments/assets/7e9c7756-b3df-40b9-9f2e-cddd4da0d39a" />
+
+
+<img width="1045" height="406" alt="image" src="https://github.com/user-attachments/assets/05b0a7e7-67aa-4c58-b1b7-436256fee4b0" />
+
 
 ### B. Escenario 6.1 — Inyección Web + Base de Datos
 
@@ -157,9 +160,6 @@ Se registró el **estado en reposo** (sin carga activa) como línea base antes d
 | idle | 6 |
 | idle in transaction | 2 |
 
-*Fig. 3. htop durante 6.1 — `node` (PID 1842) al 68 % CPU, múltiples procesos `postgres` al 12–18 % cada uno. [INSERTAR: captura-06-htop-web-bd.png]*
-
-*Fig. 4. pg_stat_activity con 24 conexiones `active`. [INSERTAR: captura-07-pg-stat.png]*
 
 **Cadena causal observada:** peticiones HTTP concurrentes + SELECT pesados → procesos `node` y `postgres` → saturación de CPU (72,4 %) e I/O de disco PostgreSQL (89 MB escritos) → load avg 5,87, 28 conexiones activas, latencia 340 ms.
 
@@ -186,9 +186,7 @@ Se registró el **estado en reposo** (sin carga activa) como línea base antes d
 | stress_monitor | 3,1 % | 198 | — |
 | postgres_db | 1,2 % | 142 | — |
 
-*Fig. 5. docker stats — `stress-ai-lab` al 312 % CPU (multi-núcleo) y 2,89 GB RAM. [INSERTAR: captura-08-docker-stats-ia.png]*
-
-*Fig. 6. htop — `python3` dominante al 189 % CPU acumulado. [INSERTAR: captura-08b-htop-ia.png]*
+<img width="1077" height="203" alt="image" src="https://github.com/user-attachments/assets/012ded61-d9a8-4934-83db-9fe0cc2e04fe" />
 
 **Cadena causal observada:** forward/backward pass PyTorch → proceso `python3` → CPU multi-núcleo (312 % en cgroup) y RAM (11,2 GB host) → load avg 7,12; swap out esporádico (`so`=4) sin activación del OOM Killer.
 
@@ -217,10 +215,6 @@ Se registró el **estado en reposo** (sin carga activa) como línea base antes d
 | stress_monitor | **198 %** | 478 |
 | postgres_db | **156 %** | 401 |
 | stress-ai-lab | **278 %** | **3 120** |
-
-*Fig. 7. htop escenario 6.3 — `node`, `postgres` y `python3` en top 10 simultáneamente; load avg 11,34 > 8 CPUs. [INSERTAR: captura-10-htop-simultaneo.png]*
-
-*Fig. 8. vmstat — columna `r` entre 14–19, `so` hasta 18 KB/s. [INSERTAR: captura-09-vmstat.png]*
 
 **Fenómenos confirmados en 6.3:**
 
