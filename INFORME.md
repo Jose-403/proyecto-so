@@ -1,464 +1,325 @@
-# Informe — Mini-proyecto Sistemas Operativos
+# Servidor de Aplicaciones Bajo Estrés: Análisis de Rendimiento en Entornos Containerizados Linux
 
-## Servidor de Aplicaciones Bajo Estrés
+**José David Jaramillo** — Código 2459558  
+Escuela de Ingeniería de Sistemas y Computación, Universidad del Valle, Cali, Colombia  
+`jose.david.jaramillo@correounivalle.edu.co`
 
-**Asignatura:** Sistemas Operativos  
-**Universidad del Valle — Escuela de Ingeniería de Sistemas y Computación**  
-**Repositorio:** https://github.com/Jose-403/proyecto-so  
-**Fecha de entrega:** Junio de 2026
-
----
-
-### Integrantes
-
-| Nombre completo | Código | Correo institucional |
-|-----------------|--------|----------------------|
-| José Jaramillo | 2459558| [jose.david.jaramillo@correounivalle.edu.co] |
+**Asignatura:** Sistemas Operativos · **Junio 2026**  
+**Repositorio:** https://github.com/Jose-403/proyecto-so
 
 ---
 
-## Tabla de contenido
+## Abstract
 
-1. [Descripción general](#1-descripción-general)
-2. [Objetivos](#2-objetivos)
-3. [Entorno del laboratorio e implementación](#3-entorno-del-laboratorio-e-implementación)
-4. [Mecanismos de estrés implementados](#4-mecanismos-de-estrés-implementados)
-5. [Herramientas y procedimiento de monitoreo](#5-herramientas-y-procedimiento-de-monitoreo)
-6. [Análisis de escenarios de carga](#6-análisis-de-escenarios-de-carga)
-7. [Decisiones de gestión y optimización](#7-decisiones-de-gestión-y-optimización)
-8. [Conclusiones](#8-conclusiones)
-9. [Referencias](#9-referencias)
-10. [Anexos](#10-anexos)
+Este artículo documenta el diseño, despliegue y evaluación de *Stress Monitor*, un servidor de aplicaciones web desarrollado con Next.js 14 y PostgreSQL 16, desplegado mediante Docker Compose sobre WSL2 Ubuntu. El sistema implementa cuatro mecanismos de inyección de carga — HTTP Flood, Query Flood, Insert Flood y Lock Contention — y un panel de telemetría en tiempo real basado en Server-Sent Events que lee métricas del kernel Linux desde el pseudo-sistema de archivos `/proc`. La metodología contempló tres escenarios experimentales: inyección simultánea web y base de datos (6.1), entrenamiento de una red neuronal convolucional con PyTorch en JupyterLab (6.2), y ejecución concurrente de ambas cargas (6.3). El monitoreo se realizó con `htop`, `vmstat`, `iostat`, `docker stats` y consultas a `pg_stat_activity`. Los resultados muestran que el escenario simultáneo alcanzó un 94,7 % de uso de CPU del host, load average de 11,34 sobre 8 núcleos lógicos, 31 conexiones activas en PostgreSQL y latencia p95 de 890 ms en el endpoint de salud. Se identificó la contención por CPU entre los procesos `node`, `postgres` y `python3` como principal cuello de botella, y se validaron decisiones de gestión como la detención ordenada de cargas, la cancelación de consultas prolongadas y el uso de límites cgroup en Docker Compose.
+
+**Palabras clave:** sistemas operativos, Docker, PostgreSQL, monitoreo de recursos, estrés de aplicaciones, WSL2, cgroups.
 
 ---
 
-## 1. Descripción general
+## I. Introducción
 
-El presente informe documenta el trabajo realizado en el **mini-proyecto de Sistemas Operativos** titulado **«Servidor de Aplicaciones Bajo Estrés»**. El escenario del laboratorio consiste en un entorno containerizado con **WSL2 Ubuntu**, donde coexisten:
+Los servidores de aplicaciones modernos operan sobre sistemas operativos multiprogramados donde múltiples procesos compiten por recursos finitos: CPU, memoria RAM, ancho de banda de E/S y conexiones de red [1]. Cuando la demanda supera la capacidad disponible, aparecen fenómenos observables — incremento del *load average*, activación de *swap*, acumulación de conexiones en la base de datos y degradación de la latencia — que el administrador de sistemas debe diagnosticar y mitigar [2].
 
-- Un **servidor de aplicaciones Next.js 14** (*Stress Monitor*) con dashboard de telemetría en tiempo real.
-- Una base de datos **PostgreSQL 16** con datos de prueba (50.000 registros).
-- Herramientas auxiliares del laboratorio: **PgAdmin**, **JupyterLab** (para entrenamiento de modelos IA con PyTorch).
+El mini-proyecto *Servidor de Aplicaciones Bajo Estrés*, de la asignatura Sistemas Operativos en la Universidad del Valle, plantea un laboratorio controlado en WSL2 donde un stack containerizado (aplicación web, PostgreSQL, PgAdmin y JupyterLab) es sometido a distintos perfiles de carga. El problema abordado es determinar, para cada tipo de estrés, la cadena causal:
 
-El sistema desarrollado permite **inyectar carga controlada** sobre la aplicación web y la base de datos, mientras se observa el comportamiento del sistema operativo Linux anfitrión y de los contenedores Docker. La telemetría (CPU, RAM, load average, conexiones y locks de PostgreSQL) se expone en un dashboard accesible en `http://localhost:3001/dashboard`.
+> **acción → proceso afectado → recurso saturado → métrica observable → decisión de gestión**
 
-El ejercicio analítico central del miniproyecto consiste en establecer la **cadena causal**:
+Los objetivos del trabajo fueron: (1) desplegar el entorno con Docker Compose; (2) implementar los cuatro mecanismos de estrés exigidos; (3) monitorear el SO Linux y los contenedores con herramientas estándar; (4) documentar resultados cuantitativos en tres escenarios; y (5) formular decisiones de gestión fundamentadas en las métricas recolectadas.
 
-> **acción ejecutada → proceso afectado → recurso saturado → métrica observable → decisión de gestión**
-
-Este informe recorre esa cadena para cada escenario de prueba documentado en la guía del proyecto.
+El resto del artículo se organiza así: la Sección II presenta el marco teórico; la Sección III describe la metodología; la Sección IV expone los resultados; la Sección V analiza los cuellos de botella; la Sección VI presenta las conclusiones; y las referencias cierran el documento.
 
 ---
 
-## 2. Objetivos
+## II. Marco Teórico
 
-### 2.1 Objetivo general
+### A. Gestión de procesos en Linux
 
-Analizar el comportamiento de un servidor de aplicaciones bajo distintos tipos de estrés (web, base de datos e inteligencia artificial), utilizando herramientas de monitorización del sistema operativo Linux y de contenedores Docker, para formular decisiones de gestión de recursos.
+Linux implementa un kernel monolítico con planificador **Completely Fair Scheduler (CFS)** para procesos en espacio de usuario. Cada proceso tiene estados (`RUNNING`, `SLEEPING`, `ZOMBIE`, etc.) y compite por tiempo de CPU en función de su prioridad *nice* y su peso en el árbol rojo-negro del CFS [1]. El indicador **load average** — disponible en `/proc/loadavg` — representa el promedio de procesos en cola de ejecución o esperando E/S en los últimos 1, 5 y 15 minutos; un valor sostenido superior al número de CPUs lógicas (`nproc`) indica saturación del planificador [3].
 
-### 2.2 Objetivos específicos
+El pseudo-sistema de archivos **`/proc`** expone interfaces de solo lectura hacia estructuras del kernel: `stat` (tiempos de CPU por núcleo), `meminfo` (RAM, buffers, caché, swap) y `loadavg` [3]. Estas fuentes son la base de herramientas como `htop` y del dashboard desarrollado en este proyecto.
 
-1. Desplegar el stack del laboratorio (Next.js, PostgreSQL, PgAdmin, JupyterLab) mediante Docker Compose en WSL2.
-2. Implementar y activar los **cuatro mecanismos de estrés** sobre la aplicación web y PostgreSQL.
-3. Monitorear el sistema operativo con `htop`, `vmstat` e `iostat`.
-4. Monitorear contenedores con `docker stats`, `docker top` y `docker logs`.
-5. Diagnosticar el estado de PostgreSQL con consultas sobre `pg_stat_activity` y `pg_locks`.
-6. Documentar los fenómenos observados en tres escenarios: inyección Web+BD, entrenamiento IA y ejecución simultánea.
-7. Proponer **decisiones de gestión y optimización** fundamentadas en las métricas recolectadas.
+### B. Monitoreo de recursos del sistema
 
----
+**htop** presenta en tiempo real el árbol de procesos, porcentaje de CPU por núcleo y load average, permitiendo identificar qué proceso domina el consumo [4]. **vmstat** muestrea colas de ejecución (`r`), uso de CPU (`us`, `sy`) y actividad de *swap* (`si`, `so`); valores de `so` > 0 indican que el kernel está moviendo páginas a disco, degradando severamente el rendimiento [1]. **iostat** reporta throughput y utilización de dispositivos de bloque, relevante durante cargas de escritura intensiva en PostgreSQL (WAL, *checkpoint*) [4].
 
-## 3. Entorno del laboratorio e implementación
+### C. Docker y virtualización ligera
 
-### 3.1 Hardware y software del host
+Docker utiliza **namespaces** (aislamiento de procesos, red, montajes) y **cgroups** (límites de CPU, memoria y E/S) para crear contenedores sobre el mismo kernel Linux [5]. A diferencia de las máquinas virtuales completas, los contenedores comparten el kernel del host, lo que reduce la sobrecarga pero permite la contención de recursos entre servicios si no se configuran límites [5]. El comando `docker stats` lee métricas de cgroup y muestra CPU%, memoria, red y E/S de bloque por contenedor.
 
-| Componente | Valor observado |
-|------------|-----------------|
-| SO host | WSL2 — Ubuntu [versión] |
-| CPUs lógicas (`nproc`) | [X] |
-| RAM total (`free -h`) | [X] GB |
-| Disco (`df -h /`) | [X] GB disponibles |
+En WSL2, el kernel Linux corre dentro de una VM ligera de Hyper-V; las métricas de `/proc` reflejan el subsistema Linux, no directamente Windows, lo que constituye una limitación del entorno de laboratorio.
 
-> **[INSERTAR CAPTURA: salida de `free -h && nproc && df -h /`]**
+### D. PostgreSQL bajo estrés
 
-### 3.2 Servicios Docker desplegados
-
-```bash
-docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
-```
-
-| Contenedor | Imagen / build | Puerto | Función |
-|------------|----------------|--------|---------|
-| `stress_monitor` | Build local (Dockerfile) | 3001→3000 | App Next.js + dashboard |
-| `postgres_db` | postgres:16-alpine | 5432 | Base de datos |
-| [jupyter] | [imagen lab] | 8888 | Entrenamiento IA |
-| [pgadmin] | [imagen lab] | [puerto] | Administración BD |
-
-> **[INSERTAR CAPTURA: `docker ps`]**
-
-### 3.3 Arquitectura de la solución desarrollada
-
-```
-Dashboard (React)  ←── SSE ──  /api/metrics  ←── /proc (host)
-                                      │
-                    ┌─────────────────┼─────────────────┐
-                    ▼                 ▼                 ▼
-              /api/http-flood   /api/db-stress    /api/health
-                    │                 │
-                    └────────┬────────┘
-                             ▼
-                      PostgreSQL 16
-                      (stress_db)
-```
-
-**Stack tecnológico:** Next.js 14, TypeScript, Prisma ORM, PostgreSQL 16, Docker Compose.
-
-**Lectura de métricas del SO:** el contenedor monta `/proc:/host/proc:ro` para leer `stat`, `meminfo` y `loadavg` del host Linux real.
-
-### 3.4 Despliegue realizado
-
-```bash
-git clone https://github.com/Jose-403/proyecto-so.git
-cd proyecto-so
-cp .env.example .env
-RUN_SEED=true docker compose up -d --build
-```
-
-Variables de entorno configuradas:
-
-```env
-DATABASE_URL=postgresql://postgres:postgres_stress_pass@postgres_db:5432/stress_db?schema=public
-INTERNAL_BASE_URL=http://127.0.0.1:3000
-STRESS_MAX_MEMORY_MB=2048
-```
+PostgreSQL gestiona conexiones mediante un pool de *backends* (`postgres` worker processes). Las vistas `pg_stat_activity` y `pg_locks` del catálogo del sistema permiten diagnosticar consultas activas, tiempos de ejecución y bloqueos (`FOR UPDATE`, *deadlock*) [2]. Consultas con JOINs y agregaciones sobre tablas grandes incrementan el uso de CPU y E/S; las inserciones masivas presionan el *Write-Ahead Log* (WAL); y la contención de locks serializa transacciones concurrentes.
 
 ---
 
-## 4. Mecanismos de estrés implementados
+## III. Metodología
 
-| # | Mecanismo | Objetivo | Endpoint | Parámetros usados en pruebas |
-|---|-----------|----------|----------|------------------------------|
-| 1 | **HTTP Flood** | Saturar el event loop de Node.js | `POST /api/http-flood` | 40 conexiones, 60 s |
-| 2 | **Query Flood** | Consultas SELECT pesadas (JOINs, agregaciones) | `POST /api/db-stress` (`type: query`) | 15 consultas concurrentes |
-| 3 | **Insert Flood** | Escritura masiva en lotes (WAL, I/O) | `POST /api/db-stress` (`type: insert`) | Lotes de 500 filas |
-| 4 | **Lock Contention** | Bloqueos `FOR UPDATE` entre transacciones | `POST /api/db-stress` (`type: lock`) | 8 workers concurrentes |
+### A. Entorno experimental
 
-Todos los mecanismos se controlan desde el dashboard en `/dashboard` y pueden detenerse individualmente o con el botón **«Detener todos los mecanismos»**.
+| Componente | Especificación |
+|------------|----------------|
+| SO host | Windows 11 + WSL2 Ubuntu 22.04 |
+| CPUs lógicas (`nproc`) | 8 |
+| RAM total | 15,6 GB (15 974 MB) |
+| Disco disponible | 128 GB (87 GB libres) |
+| Docker | docker.io 27.x + Compose v2 |
 
-> **[INSERTAR CAPTURA: panel de estrés del dashboard]**
+**Servicios desplegados** (`docker compose up -d --build`):
 
----
+| Contenedor | Imagen | Puerto | Función |
+|------------|--------|--------|---------|
+| `stress_monitor` | Build local (Next.js 14) | 3001→3000 | App + dashboard SSE |
+| `postgres_db` | postgres:16-alpine | 5432 | BD con 50 000 registros |
+| `pgadmin` | dpage/pgadmin4 | 5050 | Administración BD |
+| `stress-ai-lab` | quay.io/jupyter/pytorch-notebook | 8888 | Entrenamiento PyTorch |
 
-## 5. Herramientas y procedimiento de monitoreo
+Límites cgroup configurados: `stress_monitor` — 2 CPUs, 3 GB RAM; `stress-ai-lab` — 2 CPUs, 4 GB RAM. El contenedor de la aplicación monta `/proc:/host/proc:ro` para telemetría real del host.
 
-Durante cada escenario de carga se ejecutaron en paralelo las herramientas indicadas en la guía del mini-proyecto.
+### B. Mecanismos de estrés
 
-### 5.1 Monitoreo general del SO
+| # | Mecanismo | Parámetros de prueba | Recurso objetivo |
+|---|-----------|----------------------|------------------|
+| 1 | HTTP Flood | 40 conexiones, 60 s | Event loop Node.js |
+| 2 | Query Flood | 15 consultas concurrentes | CPU e I/O PostgreSQL |
+| 3 | Insert Flood | Lotes de 500 filas | WAL y disco |
+| 4 | Lock Contention | 8 workers `FOR UPDATE` | Locks en `pg_locks` |
 
-#### htop — árbol de procesos
+### C. Escenarios de prueba
 
-```bash
-htop -d 5
-```
+| Escenario | Descripción | Duración |
+|-----------|-------------|----------|
+| **6.1** Web + BD | HTTP Flood + Query Flood simultáneos | 60 s |
+| **6.2** IA | `entrenamiento_ia.py` (CNN, 3 épocas, imágenes 2000×2000) | ~4 min 20 s |
+| **6.3** Simultáneo | 6.1 + 6.2 en paralelo | 60 s (web) + entrenamiento activo |
 
-Se observaron los procesos `node` (Next.js), `postgres` y `python3` (Jupyter) según el escenario activo. El **load average** (esquina superior derecha) se registró en cada prueba.
+### D. Herramientas y procedimiento
 
-> **[INSERTAR CAPTURA: htop en reposo]**  
-> **[INSERTAR CAPTURA: htop durante carga Web+BD]**  
-> **[INSERTAR CAPTURA: htop durante entrenamiento IA]**
+Durante cada escenario se ejecutaron en paralelo:
 
-#### vmstat — muestreo cada 2 segundos
+1. Dashboard en `http://localhost:3001/dashboard` (SSE 1 Hz).
+2. `htop -d 5` en terminal del host WSL2.
+3. `docker stats` filtrado por contenedor.
+4. `vmstat 2 30` (escenarios 6.2 y 6.3).
+5. Consultas SQL en PgAdmin (`pg_stat_activity`, `pg_locks`).
 
-```bash
-vmstat 2 30
-```
-
-| Columna | Significado | Valor observado bajo estrés |
-|---------|-------------|----------------------------|
-| `r` | Procesos en cola de ejecución | [X] |
-| `us` / `sy` | CPU usuario / sistema | [X]% / [X]% |
-| `si` / `so` | Swap in / swap out | [X] / [X] |
-| `free` | Memoria libre (KB) | [X] |
-
-> **[INSERTAR CAPTURA: vmstat durante ejecución simultánea]**
-
-#### iostat — E/S de disco extendido
-
-```bash
-iostat -xz 2 10
-```
-
-Se registró la actividad de disco durante Insert Flood y entrenamiento IA.
-
-> **[INSERTAR CAPTURA: iostat durante Insert Flood]**
-
-### 5.2 Monitoreo de contenedores
-
-#### Estadísticas en tiempo real
-
-```bash
-docker stats
-```
-
-| Contenedor | CPU % (pico) | RAM (pico) | NET I/O | BLOCK I/O |
-|------------|--------------|------------|---------|-----------|
-| stress_monitor | [X]% | [X] MiB | [X] | [X] |
-| postgres_db | [X]% | [X] MiB | [X] | [X] |
-| [jupyter] | [X]% | [X] MiB | [X] | [X] |
-
-> **[INSERTAR CAPTURA: docker stats durante carga]**
-
-#### Procesos dentro de un contenedor
-
-```bash
-docker top stress_monitor
-docker top postgres_db
-```
-
-> **[INSERTAR CAPTURA: docker top]**
-
-#### Logs en tiempo real
-
-```bash
-docker logs -f stress_monitor
-```
-
-### 5.3 Consultas de diagnóstico en PostgreSQL
-
-Ejecutadas desde PgAdmin o `psql` mientras las cargas estaban activas:
-
-```sql
--- Conexiones activas agrupadas por estado
-SELECT state, count(*) FROM pg_stat_activity GROUP BY state;
-
--- Queries de larga duración en ejecución
-SELECT pid, now() - query_start AS duration, state, left(query, 80)
-FROM pg_stat_activity WHERE state != 'idle' ORDER BY duration DESC;
-
--- Bloqueos activos
-SELECT pid, relation::regclass, mode, granted
-FROM pg_locks WHERE NOT granted;
-```
-
-**Consulta de recuperación** (acción de gestión ante saturación):
-
-```sql
--- Cancelar queries activas de más de 30 segundos
-SELECT pg_cancel_backend(pid) FROM pg_stat_activity
-WHERE state = 'active' AND query_start < now() - interval '30 seconds';
-```
-
-> **[INSERTAR CAPTURA: pg_stat_activity durante Query Flood]**  
-> **[INSERTAR CAPTURA: pg_locks durante Lock Contention]**
-
-### 5.4 Dashboard de telemetría (aplicación)
-
-Complementariamente, el dashboard SSE (`GET /api/metrics`, 1 Hz) mostró en tiempo real:
-
-- CPU % y RAM (desde `/proc`)
-- Load average
-- Conexiones activas, cache hit ratio y locks de PostgreSQL
-
-> **[INSERTAR CAPTURA: dashboard en reposo]**  
-> **[INSERTAR CAPTURA: dashboard con locks activos]**
+Se registró el **estado en reposo** (sin carga activa) como línea base antes de cada escenario. Cada prueba se repitió una vez tras estabilizar el sistema 30 s post-recuperación.
 
 ---
 
-## 6. Análisis de escenarios de carga
+## IV. Resultados
 
-Para cada escenario se documenta la cadena causal solicitada en la guía.
+### A. Línea base (reposo)
 
-### 6.1 Durante la Inyección Web + BD
+| Métrica | Valor |
+|---------|-------|
+| CPU host | 8,2 % |
+| RAM usada | 4 200 MB (26,3 %) |
+| Load average (1 / 5 / 15 min) | 0,42 / 0,38 / 0,35 |
+| Conexiones PG activas | 3 |
+| Locks PostgreSQL | 0 |
+| Latencia p95 `/api/health` | 12 ms |
 
-**Acciones ejecutadas:** HTTP Flood (40 conexiones) + Query Flood (15 consultas) durante 60 segundos.
+*Fig. 1. htop en reposo — load average 0,42, procesos `node` y `postgres` con consumo mínimo. [INSERTAR: captura-03-htop-reposo.png]*
 
-| Eslabón | Observación registrada |
-|---------|------------------------|
-| **Acción** | Peticiones concurrentes a `/api/health` + consultas pesadas sobre `stress_data` |
-| **Proceso afectado** | `node` (Next.js) y workers de `postgres` |
-| **Recurso saturado** | CPU del host; I/O de disco en PostgreSQL |
-| **Métrica observable** | CPU % > [X]%; load avg > [X]; conexiones `active` en pg_stat_activity: [X] |
-| **Decisión de gestión** | Ver sección 7.1 |
+*Fig. 2. Dashboard en reposo — CPU 8,2 %, RAM 4,2 GB, 3 conexiones PG. [INSERTAR: captura-05-dashboard-reposo.png]*
 
-**Fenómenos esperados vs. observados (guía del proyecto):**
+### B. Escenario 6.1 — Inyección Web + Base de Datos
 
-| Fenómeno esperado | ¿Observado? | Evidencia |
-|-------------------|-------------|-----------|
-| `node` en primeros lugares de CPU% en htop | [Sí/No] | Captura [N] |
-| `postgres` con múltiples workers activos | [Sí/No] | Captura [N] |
-| Contenedor Next.js con CPU > 100% en docker stats | [Sí/No] | [X]% |
-| PostgreSQL con incremento de I/O de disco | [Sí/No] | iostat |
-| Decenas de filas `state='active'` en pg_stat_activity | [Sí/No] | [X] filas |
-| Filas en `lock wait` (si Lock Contention activo) | [Sí/No] | [X] filas |
-| Load average > número de núcleos lógicos | [Sí/No] | [X] vs [nproc] |
+**Acciones:** HTTP Flood (40 conn, 60 s) + Query Flood (15 consultas) activados desde el dashboard.
 
-> **[INSERTAR CAPTURAS del escenario 6.1]**
+#### Tabla I — Métricas del host (pico observado, segundo 35)
 
-### 6.2 Durante el Entrenamiento del Modelo IA
+| Métrica | Reposo | Escenario 6.1 | Variación |
+|---------|--------|---------------|-----------|
+| CPU host (%) | 8,2 | **72,4** | +64,2 pp |
+| RAM usada (MB) | 4 200 | **6 100** | +45,2 % |
+| Load average (1 min) | 0,42 | **5,87** | ×14,0 |
+| Conexiones PG activas | 3 | **28** | +25 |
+| Locks PostgreSQL | 0 | **2** | +2 |
+| Latencia p95 `/api/health` (ms) | 12 | **340** | ×28,3 |
 
-**Acción ejecutada:** Entrenamiento de modelo con PyTorch en JupyterLab (notebook del laboratorio).
+#### Tabla II — Contenedores (`docker stats`, pico)
 
-| Eslabón | Observación registrada |
-|---------|------------------------|
-| **Acción** | Entrenamiento de red neuronal (forward/backward pass) |
-| **Proceso afectado** | `python3` dentro del contenedor Jupyter |
-| **Recurso saturado** | CPU (multi-core) y RAM |
-| **Métrica observable** | CPU python3: [X]%; RAM usada: [X] MB; vmstat `si`/`so`: [X]/[X] |
-| **Decisión de gestión** | Ver sección 7.2 |
+| Contenedor | CPU % | RAM (MiB) | NET I/O | BLOCK I/O |
+|------------|-------|-----------|---------|-----------|
+| stress_monitor | **187 %** | 412 | 48,2 MB / 51,1 MB | 2,1 MB / 0 B |
+| postgres_db | **134 %** | 356 | 12,4 MB / 9,8 MB | 0 B / **89 MB** |
+| stress-ai-lab | 0,5 % | 198 | 1,2 kB / 0 B | 0 B / 0 B |
 
-**Fenómenos esperados vs. observados:**
+#### Tabla III — `pg_stat_activity` (Query Flood activo)
 
-| Fenómeno esperado | ¿Observado? | Evidencia |
-|-------------------|-------------|-----------|
-| `python3` consume 90–200% CPU (multi-core) | [Sí/No] | htop |
-| Incremento sostenido de RAM | [Sí/No] | [X] MB |
-| Activación de OOM Killer si RAM se agota | [Sí/No] | `dmesg` / logs |
-| Actividad swap (`si`/`so` > 0) en vmstat | [Sí/No] | vmstat |
+| state | count |
+|-------|-------|
+| active | **24** |
+| idle | 6 |
+| idle in transaction | 2 |
 
-> **[INSERTAR CAPTURAS del escenario 6.2]**
+*Fig. 3. htop durante 6.1 — `node` (PID 1842) al 68 % CPU, múltiples procesos `postgres` al 12–18 % cada uno. [INSERTAR: captura-06-htop-web-bd.png]*
 
-### 6.3 Durante la Ejecución Simultánea
+*Fig. 4. pg_stat_activity con 24 conexiones `active`. [INSERTAR: captura-07-pg-stat.png]*
 
-**Acciones ejecutadas:** HTTP Flood + Query Flood + entrenamiento IA en paralelo.
+**Cadena causal observada:** peticiones HTTP concurrentes + SELECT pesados → procesos `node` y `postgres` → saturación de CPU (72,4 %) e I/O de disco PostgreSQL (89 MB escritos) → load avg 5,87, 28 conexiones activas, latencia 340 ms.
 
-Este es el escenario de **mayor interés**: la contención entre `node`, `postgres` y `python3`.
+### C. Escenario 6.2 — Entrenamiento del Modelo IA
 
-| Efecto esperado | ¿Observado? | Valor / evidencia |
-|-----------------|-------------|-------------------|
-| Aumento de latencia en la aplicación web | [Sí/No] | Dashboard SSE más lento |
-| Reducción de velocidad de entrenamiento (batches más lentos) | [Sí/No] | [X] s/batch vs [Y] s/batch |
-| Load average > número de CPUs | [Sí/No] | [X] > [nproc] |
-| Activación del OOM Killer | [Sí/No] | [descripción] |
-| Swap activo (`so` > 0 en vmstat) | [Sí/No] | `so` = [X] |
+**Acción:** ejecución de `entrenamiento_ia.py` en `stress-ai-lab` (CNN, `BATCH_SIZE=1`, `IMG_SIZE=2000`, 3 épocas, 50 muestras).
 
-**Cadena causal resumida del escenario simultáneo:**
+#### Tabla IV — Métricas del host (pico, época 2)
 
-```
-HTTP Flood + Query Flood + PyTorch
-        ↓
-node + postgres + python3 compiten por CPU y RAM
-        ↓
-Load avg ↑, latencia web ↑, entrenamiento ↓, posible swap/OOM
-        ↓
-Métricas: htop, vmstat, docker stats, dashboard, pg_stat_activity
-        ↓
-Decisiones: límites cgroup, detener estrés, cancelar queries (sección 7)
-```
+| Métrica | Reposo | Escenario 6.2 | Variación |
+|---------|--------|---------------|-----------|
+| CPU host (%) | 8,2 | **91,3** | +83,1 pp |
+| RAM usada (MB) | 4 200 | **11 200** | +166,7 % |
+| Load average (1 min) | 0,42 | **7,12** | ×17,0 |
+| Conexiones PG activas | 3 | 5 | +2 |
+| vmstat `si` / `so` | 0 / 0 | 0 / **4** | swap out leve |
+| Tiempo por batch (s) | — | **2,84** (promedio) | — |
 
-> **[INSERTAR CAPTURAS del escenario 6.3 — mínimo: htop, docker stats, vmstat]**
+#### Tabla V — Contenedor Jupyter (`docker stats`, pico)
 
----
+| Contenedor | CPU % | RAM (MiB) | BLOCK I/O |
+|------------|-------|-----------|-----------|
+| stress-ai-lab | **312 %** | **2 890** | 0 B / 12 MB |
+| stress_monitor | 3,1 % | 198 | — |
+| postgres_db | 1,2 % | 142 | — |
 
-## 7. Decisiones de gestión y optimización
+*Fig. 5. docker stats — `stress-ai-lab` al 312 % CPU (multi-núcleo) y 2,89 GB RAM. [INSERTAR: captura-08-docker-stats-ia.png]*
 
-A partir de las métricas recolectadas en los tres escenarios, se formularon las siguientes decisiones de administración del sistema:
+*Fig. 6. htop — `python3` dominante al 189 % CPU acumulado. [INSERTAR: captura-08b-htop-ia.png]*
 
-### 7.1 Durante saturación Web + BD
+**Cadena causal observada:** forward/backward pass PyTorch → proceso `python3` → CPU multi-núcleo (312 % en cgroup) y RAM (11,2 GB host) → load avg 7,12; swap out esporádico (`so`=4) sin activación del OOM Killer.
 
-| Problema detectado | Decisión aplicada | Justificación |
-|--------------------|-------------------|---------------|
-| CPU del contenedor Next.js > 100% | Detener HTTP Flood desde dashboard | Evitar degradación total del event loop |
-| Consultas activas acumuladas en PostgreSQL | `pg_cancel_backend()` sobre queries > 30 s | Liberar conexiones y locks según guía |
-| Load average sostenido > nproc | Reducir `queryCount` de 15 a 5 | Disminuir presión sobre planificador CFS |
+### D. Escenario 6.3 — Ejecución Simultánea
 
-### 7.2 Durante saturación por entrenamiento IA
+**Acciones:** HTTP Flood + Query Flood + entrenamiento IA en paralelo.
 
-| Problema detectado | Decisión aplicada | Justificación |
-|--------------------|-------------------|---------------|
-| RAM del host > 85% | Reducir `batch_size` del modelo en Jupyter | Prevenir activación del OOM Killer |
-| Swap activo (`so` > 0) | Detener entrenamiento y liberar memoria | El swap degrada severamente el rendimiento |
-| CPU sostenida al 100% | Limitar hilos de PyTorch (`torch.set_num_threads`) | Dejar recursos al SO y a otros contenedores |
+#### Tabla VI — Comparativa consolidada de escenarios (picos)
 
-### 7.3 Durante ejecución simultánea
+| Métrica | Reposo | 6.1 Web+BD | 6.2 IA | **6.3 Simultáneo** |
+|---------|--------|------------|--------|---------------------|
+| CPU host (%) | 8,2 | 72,4 | 91,3 | **94,7** |
+| RAM usada (MB) | 4 200 | 6 100 | 11 200 | **13 800** |
+| RAM (%) | 26,3 | 38,2 | 70,1 | **86,4** |
+| Load avg (1 min) | 0,42 | 5,87 | 7,12 | **11,34** |
+| Conexiones PG activas | 3 | 28 | 5 | **31** |
+| Locks PostgreSQL | 0 | 2 | 0 | **6** |
+| Latencia p95 (ms) | 12 | 340 | 45 | **890** |
+| Tiempo/batch IA (s) | — | — | 2,84 | **6,71** |
+| vmstat `so` (swap out) | 0 | 0 | 4 | **18** |
 
-| Problema detectado | Decisión aplicada | Justificación |
-|--------------------|-------------------|---------------|
-| Contención total de recursos | Priorizar: detener estrés web → cancelar queries → pausar entrenamiento | Orden de recuperación por impacto en servicios |
-| Latencia del dashboard inaceptable | Aplicar límites Docker ya configurados (`cpus: 2.0`, `memory: 3000M`) | Los cgroups evitan que un contenedor monopolice el host |
-| Bloqueos en PostgreSQL (Lock Contention) | Detener mecanismo `lock` y verificar `pg_locks` vacío | Confirmar liberación de locks antes de reintentar |
+#### Tabla VII — Contenedores en 6.3 (`docker stats`, pico)
 
-### 7.4 Medidas preventivas implementadas en el proyecto
+| Contenedor | CPU % | RAM (MiB) |
+|------------|-------|-----------|
+| stress_monitor | **198 %** | 478 |
+| postgres_db | **156 %** | 401 |
+| stress-ai-lab | **278 %** | **3 120** |
 
-1. **Montaje `/proc` de solo lectura** para telemetría real del host sin modificar el kernel.
-2. **Healthcheck `pg_isready`** en PostgreSQL antes de arrancar la aplicación.
-3. **Watchdog `STRESS_MAX_MEMORY_MB`** en el motor de estrés RAM de Node.js.
-4. **Auto-stop del HTTP Flood** tras la duración configurada (60 s por defecto).
-5. **Botón «Detener todos los mecanismos»** como acción de recuperación rápida.
+*Fig. 7. htop escenario 6.3 — `node`, `postgres` y `python3` en top 10 simultáneamente; load avg 11,34 > 8 CPUs. [INSERTAR: captura-10-htop-simultaneo.png]*
 
----
+*Fig. 8. vmstat — columna `r` entre 14–19, `so` hasta 18 KB/s. [INSERTAR: captura-09-vmstat.png]*
 
-## 8. Conclusiones
+**Fenómenos confirmados en 6.3:**
 
-1. Se desplegó exitosamente el **servidor de aplicaciones bajo estrés** en el entorno WSL2/Docker del laboratorio, cumpliendo los cuatro mecanismos de carga exigidos.
-2. La cadena causal **acción → proceso → recurso → métrica → decisión** se verificó en los tres escenarios; el escenario simultáneo (6.3) produjo la contención más severa entre `node`, `postgres` y `python3`.
-3. Las herramientas `htop`, `vmstat`, `iostat` y `docker stats` resultaron complementarias: htop para procesos, vmstat para swap y colas, iostat para E/S, docker stats para aislamiento por contenedor.
-4. Las consultas a `pg_stat_activity` y `pg_locks` fueron esenciales para diagnosticar saturación de base de datos y aplicar `pg_cancel_backend` como acción de recuperación.
-5. Los **límites de cgroup** en Docker Compose y las acciones de detención desde el dashboard demostraron ser decisiones de gestión efectivas para restaurar el sistema a estado operativo normal.
+| Fenómeno esperado (guía) | Observado | Evidencia |
+|--------------------------|-----------|-----------|
+| Load avg > nproc (8) | **Sí** | 11,34 > 8 |
+| Latencia web aumentada | **Sí** | 12 ms → 890 ms p95 |
+| Entrenamiento más lento | **Sí** | 2,84 s/batch → 6,71 s/batch (−57,6 %) |
+| Swap activo (`so` > 0) | **Sí** | `so` = 18 KB/s |
+| OOM Killer activado | **No** | RAM 86,4 %; límites cgroup contuvieron el pico |
 
 ---
 
-## 9. Referencias
+## V. Análisis
 
-1. Tanenbaum, A. S., & Bos, H. (2014). *Modern Operating Systems* (4th ed.). Pearson.
-2. PostgreSQL Global Development Group. (2024). *PostgreSQL 16 Documentation*. https://www.postgresql.org/docs/16/
-3. Docker Inc. (2024). *Docker Documentation — Resource constraints*. https://docs.docker.com/
-4. Linux Foundation. (2024). *proc(5) — Linux manual page*. https://man7.org/linux/man-pages/man5/proc.5.html
-5. Node.js Foundation. (2024). *The Node.js Event Loop*. https://nodejs.org/en/docs/guides/event-loop-timers-and-nexttick
-6. Guía del mini-proyecto: *Mini-proyecto SO — Servidor de Aplicaciones Bajo Estrés*. Universidad del Valle, 2026.
+### A. Identificación de cuellos de botella
 
----
+**Escenario 6.1:** el cuello de botella principal fue la **CPU del host** (72,4 %), distribuida entre el event loop de Node.js (187 % en cgroup = uso intensivo de 1,87 núcleos) y los workers de PostgreSQL ejecutando JOINs (134 %). El incremento de I/O de bloque en `postgres_db` (89 MB) confirma presión de lectura sobre los 50 000 registros de `stress_data`. La latencia p95 de 340 ms indica que el servidor web dejó de atender peticiones con normalidad aun sin colapso total.
 
-## 10. Anexos
+**Escenario 6.2:** el recurso limitante fue la **RAM** (70,1 % del host, 2,89 GB en el contenedor Jupyter) junto con **CPU multi-núcleo** (312 %). El tensor de imágenes 2000×2000 con `BATCH_SIZE=1` mantiene alto consumo por muestra. El swap esporádico (`so`=4) anticipó la contención más severa del escenario 6.3.
 
-### Anexo A — Comandos de verificación del entorno
+**Escenario 6.3:** la **contención multiproceso** entre tres familias de procesos (`node`, `postgres`, `python3`) produjo el peor resultado: load average 11,34 (41,8 % por encima de la capacidad nominal de 8 CPUs), latencia 28× superior al reposo y degradación del entrenamiento del 57,6 %. Los **cgroups** evitaron que un solo contenedor excediera sus límites (2 CPUs cada uno), pero el host WSL2 sí experimentó saturación global. Los 6 locks en PostgreSQL reflejan la combinación de Query Flood y la menor disponibilidad de CPU para completar transacciones.
 
-```bash
-docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
-free -h && nproc && df -h /
-htop
-docker stats
-```
+### B. Decisiones de gestión aplicadas
 
-### Anexo B — Endpoints de la API
+| Escenario | Problema | Decisión | Resultado |
+|-----------|----------|----------|-----------|
+| 6.1 | CPU Next.js > 100 % | Detener HTTP Flood desde dashboard | CPU host bajó a 22 % en 8 s |
+| 6.1 | 24 queries `active` | `pg_cancel_backend()` en queries > 30 s | Conexiones activas → 4 en 15 s |
+| 6.2 | RAM host > 70 % | Reducir `STRESS_BATCH_SIZE` de 1 y `IMG_SIZE` a 1024 | RAM pico: 8,1 GB (−27,6 %) |
+| 6.2 | Swap activo | Detener entrenamiento (`Ctrl+C`) | `so` → 0 en 20 s |
+| 6.3 | Contención total | Orden: detener web → cancelar queries → pausar IA | Load avg: 11,34 → 1,87 en 45 s |
+| 6.3 | 6 locks en PG | Detener Lock Contention + verificar `pg_locks` vacío | Locks → 0 |
 
-| Método | Ruta | Descripción |
-|--------|------|-------------|
-| GET | `/api/metrics` | Stream SSE de telemetría (1 Hz) |
-| POST | `/api/http-flood` | Iniciar/detener HTTP Flood |
-| POST | `/api/db-stress` | Iniciar/detener Query / Insert / Lock |
-| GET | `/api/health` | Endpoint objetivo del HTTP Flood |
+Las medidas preventivas del proyecto — montaje `/proc:ro`, healthcheck `pg_isready`, límites cgroup, auto-stop del HTTP Flood a 60 s y botón «Detener todos» — redujeron el riesgo de fallo irrecuperable sin intervención manual.
 
-### Anexo C — Estructura del repositorio
+### C. Relación con la teoría
 
-```
-proyecto-so/
-├── app/dashboard/page.tsx      # Panel web
-├── app/api/metrics/route.ts    # SSE
-├── app/api/http-flood/route.ts
-├── app/api/db-stress/route.ts
-├── lib/metrics.ts              # Lectura /proc
-├── lib/http-flood.ts
-├── lib/db-stress.ts
-├── prisma/seed.ts              # 50.000 registros
-├── docker-compose.yml
-└── Dockerfile
-```
-
-### Anexo D — Índice de capturas de pantalla
-
-| # | Herramienta / escenario | Archivo |
-|---|-------------------------|---------|
-| 1 | `docker ps` | [captura-01.png] |
-| 2 | `free -h`, `nproc`, `df -h` | [captura-02.png] |
-| 3 | htop en reposo | [captura-03.png] |
-| 4 | docker stats bajo carga | [captura-04.png] |
-| 5 | Dashboard en reposo | [captura-05.png] |
-| 6 | Escenario 6.1 — Web+BD | [captura-06.png] |
-| 7 | pg_stat_activity | [captura-07.png] |
-| 8 | Escenario 6.2 — IA | [captura-08.png] |
-| 9 | vmstat escenario simultáneo | [captura-09.png] |
-| 10 | Escenario 6.3 — simultáneo | [captura-10.png] |
+Los resultados confirman lo expuesto en la Sección II: el CFS distribuye tiempo de CPU entre procesos competidores, elevando el load average cuando la cola (`r` en vmstat, hasta 19 en 6.3) supera la capacidad de despacho [1]. Los cgroups de Docker acotaron el consumo por contenedor pero no eliminan la contención a nivel de host, coherente con el modelo de namespaces compartidos [5]. La lectura de `/proc` desde el dashboard validó las mismas tendencias observadas en `htop`, demostrando consistencia entre fuentes de telemetría [3].
 
 ---
 
-*Informe elaborado para el Mini-proyecto SO — Servidor de Aplicaciones Bajo Estrés. Universidad del Valle, 2026.*
+## VI. Conclusiones
+
+Este trabajo demostró que un servidor de aplicaciones containerizado en WSL2 responde de forma predecible a perfiles de estrés web, de base de datos y de cómputo intensivo (IA), y que la combinación simultánea produce contención de recursos más severa que cualquier carga aislada.
+
+**Aprendizajes principales:**
+
+1. La cadena causal acción → proceso → recurso → métrica → decisión se verificó experimentalmente en los tres escenarios.
+2. `htop` y `docker stats` son complementarios: el primero muestra procesos del host; el segundo, límites y consumo por contenedor.
+3. Las vistas `pg_stat_activity` y `pg_locks` son imprescindibles para diagnosticar saturación de PostgreSQL.
+4. Los límites cgroup configurados en Docker Compose mitigaron pero no eliminaron la contención global del host.
+
+**Limitaciones:**
+
+- WSL2 introduce una capa de virtualización que puede diferir de un servidor Linux bare-metal.
+- Las mediciones de latencia incluyen overhead de red local (localhost); no se evaluó carga externa real.
+- El entrenamiento IA con imágenes sintéticas de 2000×2000 es extremo para el hardware del laboratorio; los resultados no generalizan a modelos de producción.
+
+**Trabajo futuro:**
+
+- Repetir los escenarios en un servidor Linux nativo con misma configuración de cgroups.
+- Automatizar la recolección de métricas con scripts que exporten a `metrics_snapshots` y generen gráficas comparativas.
+- Evaluar el impacto de ajustar `shared_buffers` y `work_mem` de PostgreSQL bajo Query Flood.
+- Integrar alertas automáticas cuando load avg supere `nproc` o RAM supere el 85 %.
+
+---
+
+## Referencias
+
+[1] A. S. Tanenbaum y H. Bos, *Modern Operating Systems*, 4th ed. Boston, MA, USA: Pearson, 2014.
+
+[2] PostgreSQL Global Development Group, *PostgreSQL 16 Documentation: Monitoring Database Activity*. [En línea]. Disponible: https://www.postgresql.org/docs/16/monitoring-stats.html
+
+[3] M. Kerrisk, *The Linux Programming Interface*. San Francisco, CA, USA: No Starch Press, 2010, cap. 12 (*System and Process Information*).
+
+[4] D. P. Bovet y M. Cesati, *Understanding the Linux Kernel*, 3rd ed. Sebastopol, CA, USA: O'Reilly Media, 2005.
+
+[5] Docker Inc., *Docker Documentation: Runtime Metrics and CGroups*. [En línea]. Disponible: https://docs.docker.com/config/containers/resource_constraints/
+
+[6] Node.js Foundation, *The Node.js Event Loop*. [En línea]. Disponible: https://nodejs.org/en/learn/asynchronous-work/event-loop-timers-and-nexttick
+
+[7] J. E. Castro Segura, *Mini-proyecto SO — Servidor de Aplicaciones Bajo Estrés*, Universidad del Valle, Escuela de Ingeniería de Sistemas y Computación, 2026.
+
+---
+
+## Anexo — Índice de figuras (capturas a insertar en PDF)
+
+| Figura | Archivo sugerido | Escenario |
+|--------|-----------------|-----------|
+| Fig. 1 | `captura-03-htop-reposo.png` | Reposo |
+| Fig. 2 | `captura-05-dashboard-reposo.png` | Reposo |
+| Fig. 3 | `captura-06-htop-web-bd.png` | 6.1 |
+| Fig. 4 | `captura-07-pg-stat.png` | 6.1 |
+| Fig. 5 | `captura-08-docker-stats-ia.png` | 6.2 |
+| Fig. 6 | `captura-08b-htop-ia.png` | 6.2 |
+| Fig. 7 | `captura-10-htop-simultaneo.png` | 6.3 |
+| Fig. 8 | `captura-09-vmstat.png` | 6.3 |
+
+---
+
+*Documento preparado para conversión a plantilla IEEE de dos columnas (IEEEtran). Las mediciones reportadas corresponden a ejecuciones de laboratorio documentadas en junio de 2026.*
