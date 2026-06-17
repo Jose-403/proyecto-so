@@ -1,3 +1,5 @@
+import { logStressEvent } from '@/lib/persistence';
+
 export interface StressState {
   cpuActive: boolean;
   ramActive: boolean;
@@ -40,6 +42,7 @@ export function startCpuStress(threads: number, duration: number) {
   globalStressState.cpuActive = true;
 
   console.log(`[STRESS] Iniciando sobrecarga de CPU con ${threads} hilos ficticios.`);
+  void logStressEvent('cpu', threads, duration * 1000);
 
   const intervalId = setInterval(() => {
     if (!globalStressState.cpuActive) return;
@@ -76,7 +79,8 @@ export function startRamStress(memoryMB: number) {
   globalStressState.ramActive = true;
 
   console.log(`[STRESS] Solicitada alocación progresiva de RAM: ${memoryMB} MB.`);
-  
+  void logStressEvent('ram', memoryMB, 0);
+
   const stepMB = 50; // Alocar en bloques controlados de 50MB
   let currentAllocated = 0;
 

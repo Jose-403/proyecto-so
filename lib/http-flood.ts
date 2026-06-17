@@ -1,3 +1,5 @@
+import { logStressEvent } from '@/lib/persistence';
+
 let httpFloodActive = false;
 let httpFloodTimer: NodeJS.Timeout | null = null;
 
@@ -43,6 +45,7 @@ export function startHttpFlood(concurrency: number, durationSec: number): void {
   httpFloodState.failedRequests = 0;
 
   console.log(`[HTTP FLOOD] Iniciando con ${concurrency} conexiones concurrentes.`);
+  void logStressEvent('http-flood', concurrency, durationSec * 1000);
 
   httpFloodTimer = setInterval(() => {
     if (!httpFloodActive) return;

@@ -1,7 +1,6 @@
-import { PrismaClient } from '@prisma/client';
 import crypto from 'crypto';
-
-const prisma = new PrismaClient();
+import { logStressEvent } from '@/lib/persistence';
+import { prisma } from '@/lib/prisma';
 
 type DbStressType = 'query' | 'insert' | 'lock';
 
@@ -89,6 +88,10 @@ export function startDbStress(
 
   activeStress[type] = true;
   console.log(`[STRESS DB] Iniciando mecanismo: ${type}`);
+
+  const intensity =
+    type === 'query' ? queryCount : type === 'insert' ? batchSize : lockWorkers;
+  void logStressEvent(`db-${type}`, intensity, 0);
 
   if (type === 'query') void runQueryFlood();
   if (type === 'insert') void runInsertFlood();

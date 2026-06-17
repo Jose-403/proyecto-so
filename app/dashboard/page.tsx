@@ -32,6 +32,9 @@ export default function Dashboard() {
   const [queryCount, setQueryCount] = useState(15);
   const [batchSize, setBatchSize] = useState(500);
   const [lockWorkers, setLockWorkers] = useState(8);
+  const [cpuThreads, setCpuThreads] = useState(2);
+  const [cpuDuration, setCpuDuration] = useState(30);
+  const [ramMB, setRamMB] = useState(500);
 
   useEffect(() => {
     const eventSource = new EventSource('/api/metrics');
@@ -92,6 +95,28 @@ export default function Dashboard() {
           </span>
         </div>
       </header>
+
+      <div className="flex flex-wrap gap-3 text-xs">
+        <a
+          href="http://localhost:5050"
+          target="_blank"
+          rel="noreferrer"
+          className="bg-slate-900 border border-slate-700 px-3 py-1.5 rounded-lg text-cyan-400 hover:border-cyan-500"
+        >
+          PgAdmin → localhost:5050
+        </a>
+        <a
+          href="http://localhost:8888"
+          target="_blank"
+          rel="noreferrer"
+          className="bg-slate-900 border border-slate-700 px-3 py-1.5 rounded-lg text-orange-400 hover:border-orange-500"
+        >
+          JupyterLab → localhost:8888 (token: stress_lab_token)
+        </a>
+        <span className="bg-slate-900 border border-slate-700 px-3 py-1.5 rounded-lg text-slate-400">
+          Histórico BD: GET /api/snapshots
+        </span>
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
@@ -346,6 +371,107 @@ export default function Dashboard() {
               </button>
             </div>
           </div>
+
+          <div className="space-y-4 bg-slate-950 p-4 rounded-xl border border-slate-800">
+            <h4 className="font-semibold text-amber-400">5. Estrés CPU (complementario)</h4>
+            <p className="text-xs text-slate-500">
+              Carga síncrona del event loop (Fibonacci / ordenamiento). Útil para escenario 6.3.
+            </p>
+            <label className="text-xs text-slate-400 flex justify-between">
+              Hilos ficticios: <span>{cpuThreads}</span>
+            </label>
+            <input
+              type="range"
+              min="1"
+              max="8"
+              value={cpuThreads}
+              onChange={(e) => setCpuThreads(Number(e.target.value))}
+              className="w-full accent-amber-500"
+            />
+            <label className="text-xs text-slate-400 flex justify-between">
+              Duración (seg): <span>{cpuDuration}</span>
+            </label>
+            <input
+              type="range"
+              min="10"
+              max="120"
+              step="10"
+              value={cpuDuration}
+              onChange={(e) => setCpuDuration(Number(e.target.value))}
+              className="w-full accent-amber-500"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={() =>
+                  callStressApi('/api/stress', {
+                    action: 'start',
+                    type: 'cpu',
+                    threads: cpuThreads,
+                    duration: cpuDuration,
+                  })
+                }
+                className="w-full bg-amber-600 hover:bg-amber-500 text-white font-medium py-2 rounded-lg text-sm"
+              >
+                Iniciar CPU
+              </button>
+              <button
+                onClick={() => callStressApi('/api/stress', { action: 'stop', type: 'cpu' })}
+                className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium py-2 rounded-lg text-sm"
+              >
+                Detener
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-4 bg-slate-950 p-4 rounded-xl border border-slate-800">
+            <h4 className="font-semibold text-purple-400">6. Estrés RAM (complementario)</h4>
+            <p className="text-xs text-slate-500">
+              Alocación progresiva de buffers. Watchdog según STRESS_MAX_MEMORY_MB.
+            </p>
+            <label className="text-xs text-slate-400 flex justify-between">
+              Memoria objetivo: <span>{ramMB} MB</span>
+            </label>
+            <input
+              type="range"
+              min="100"
+              max="1500"
+              step="100"
+              value={ramMB}
+              onChange={(e) => setRamMB(Number(e.target.value))}
+              className="w-full accent-purple-500"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={() =>
+                  callStressApi('/api/stress', {
+                    action: 'start',
+                    type: 'ram',
+                    memoryMB: ramMB,
+                  })
+                }
+                className="w-full bg-purple-600 hover:bg-purple-500 text-white font-medium py-2 rounded-lg text-sm"
+              >
+                Iniciar RAM
+              </button>
+              <button
+                onClick={() => callStressApi('/api/stress', { action: 'stop', type: 'ram' })}
+                className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium py-2 rounded-lg text-sm"
+              >
+                Detener
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-6 p-4 bg-slate-950 rounded-xl border border-slate-800">
+          <h4 className="font-semibold text-orange-400 mb-2">Escenario 6.2 — Entrenamiento IA (JupyterLab)</h4>
+          <p className="text-xs text-slate-500 mb-2">
+            Abra JupyterLab y ejecute el notebook <code className="text-slate-300">training_ai_model.ipynb</code>{' '}
+            (enviado por el profesor). Monitoree con htop y docker stats.
+          </p>
+          <code className="text-xs text-slate-400 block">
+            docker compose exec stress-ai-lab python /home/jovyan/work/entrenamiento_ia.py
+          </code>
         </div>
 
         <div className="mt-6 flex justify-end">
@@ -353,6 +479,8 @@ export default function Dashboard() {
             onClick={async () => {
               await callStressApi('/api/http-flood', { action: 'stop' });
               await callStressApi('/api/db-stress', { action: 'stop' });
+              await callStressApi('/api/stress', { action: 'stop', type: 'cpu' });
+              await callStressApi('/api/stress', { action: 'stop', type: 'ram' });
             }}
             className="bg-rose-700 hover:bg-rose-600 text-white font-semibold px-6 py-2 rounded-lg text-sm"
           >

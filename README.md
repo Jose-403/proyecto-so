@@ -56,7 +56,24 @@ Abrir: [http://localhost:3000/dashboard](http://localhost:3000/dashboard)
 docker compose up -d --build
 ```
 
-El servicio queda en el puerto **3001** → `http://localhost:3001/dashboard`
+| Servicio | URL | Credenciales |
+|----------|-----|--------------|
+| Dashboard | http://localhost:3001/dashboard | — |
+| PgAdmin | http://localhost:5050 | admin@admin.com / admin_stress_pass |
+| JupyterLab | http://localhost:8888 | token: `stress_lab_token` |
+| PostgreSQL | localhost:5432 | postgres / postgres_stress_pass |
+
+**PgAdmin — conexión al servidor:** Host `postgres_db`, puerto `5432`, usuario `postgres`, contraseña `postgres_stress_pass`, BD `stress_db`.
+
+**Escenario 6.2 (IA):** abrir en JupyterLab el notebook del profesor `training_ai_model.ipynb` o ejecutar el script equivalente:
+
+```bash
+docker compose exec stress-ai-lab python /home/jovyan/work/entrenamiento_ia.py
+```
+
+Monitorear en otra terminal: `docker stats stress-ai-lab`
+
+**Histórico de métricas:** `GET http://localhost:3001/api/snapshots` (tablas `metrics_snapshots` y `stress_logs`).
 
 ### Opción B — Agregar al docker-compose.yml existente
 
@@ -96,11 +113,18 @@ app/
     http-flood/    # Control HTTP Flood
     db-stress/     # Query, Insert y Lock Contention
     health/        # Endpoint objetivo del HTTP Flood
+    snapshots/     # Histórico metrics_snapshots + stress_logs
+    stress/        # Estrés CPU/RAM complementario
   dashboard/       # Panel de control web
 lib/
   metrics.ts       # Lectura de /proc y pg_stat_activity
   http-flood.ts    # Motor HTTP Flood
   db-stress.ts     # Motor de estrés PostgreSQL
+  persistence.ts   # Guardado en metrics_snapshots y stress_logs
+  prisma.ts        # Cliente Prisma compartido
+jupyter/
+  training_ai_model.ipynb  # Notebook del profesor (escenario 6.2)
+  entrenamiento_ia.py      # Mismo flujo ejecutable por terminal
 prisma/
   schema.prisma
   seed.ts          # 50.000 registros de prueba

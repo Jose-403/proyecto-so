@@ -1,7 +1,5 @@
 import fs from 'fs';
-import { PrismaClient } from '@prisma/client';
-
-const prisma = new PrismaClient();
+import { prisma } from '@/lib/prisma';
 
 // Intentar leer la ruta montada del host de Docker, si no, fallback a local (desarrollo directo)
 const PROC_PATH = fs.existsSync('/host/proc') ? '/host/proc' : '/proc';

@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSystemMetrics, getPostgresMetrics } from '@/lib/metrics';
+import { saveMetricsSnapshot } from '@/lib/persistence';
 
 export const dynamic = 'force-dynamic';
+
+const SNAPSHOT_INTERVAL_SEC = Number(process.env.METRICS_SNAPSHOT_INTERVAL_SEC || 10);
 
 export async function GET(req: NextRequest) {
   const responseStream = new TransformStream();
@@ -9,6 +12,7 @@ export async function GET(req: NextRequest) {
   const encoder = new TextEncoder();
 
   let isHeartbeatActive = true;
+  let tickCount = 0;
 
   req.signal.addEventListener('abort', () => {
     isHeartbeatActive = false;
@@ -24,7 +28,16 @@ export async function GET(req: NextRequest) {
 
     const baseMetrics = getSystemMetrics();
     const pgMetrics = await getPostgresMetrics();
-    
+
+    tickCount += 1;
+    if (tickCount % SNAPSHOT_INTERVAL_SEC === 0) {
+      void saveMetricsSnapshot(
+        baseMetrics.cpu.total,
+        baseMetrics.ram.used,
+        pgMetrics.activeConnections
+      );
+    }
+
     const aggregatedData = {
       ...baseMetrics,
       postgres: pgMetrics,

@@ -1,25 +1,5 @@
-# Para agregar este servicio al docker-compose.yml existente del laboratorio,
-# copie el bloque "stress_monitor" al final de la sección services:
-#
-#   stress_monitor:
-#     build:
-#       context: ./stress-monitor
-#       dockerfile: Dockerfile
-#     ports:
-#       - "3001:3000"
-#     environment:
-#       DATABASE_URL: postgresql://postgres:postgres_stress_pass@postgres_db:5432/stress_db?schema=public
-#       INTERNAL_BASE_URL: http://127.0.0.1:3000
-#       STRESS_MAX_MEMORY_MB: 2048
-#     volumes:
-#       - /proc:/host/proc:ro
-#     depends_on:
-#       postgres_db:
-#         condition: service_healthy
-#     networks:
-#       - default
-
-version: '3.8'
+# Stack completo del mini-proyecto SO (laboratorio WSL2)
+# Opción B: copiar solo el bloque stress_monitor si ya existe compose del lab.
 
 services:
   stress_monitor:
@@ -27,12 +7,14 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: stress_monitor
+    restart: unless-stopped
     ports:
       - "3001:3000"
     environment:
       DATABASE_URL: postgresql://postgres:postgres_stress_pass@postgres_db:5432/stress_db?schema=public
       INTERNAL_BASE_URL: http://127.0.0.1:3000
       STRESS_MAX_MEMORY_MB: 2048
+      METRICS_SNAPSHOT_INTERVAL_SEC: 10
     volumes:
       - /proc:/host/proc:ro
     depends_on:
@@ -61,5 +43,40 @@ services:
       timeout: 5s
       retries: 5
 
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    restart: unless-stopped
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin_stress_pass
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+
+  jupyterlab:
+    # Imágenes Jupyter oficiales migraron de Docker Hub a Quay.io
+    image: quay.io/jupyter/pytorch-notebook:latest
+    container_name: stress-ai-lab
+    ports:
+      - "8888:8888"
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      JUPYTER_TOKEN: stress_lab_token
+      GRANT_SUDO: "yes"
+    volumes:
+      - ./jupyter:/home/jovyan/work
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4096M
+
 volumes:
   pgdata:
+  pgadmin_data:
