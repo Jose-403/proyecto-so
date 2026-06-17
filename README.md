@@ -133,5 +133,5 @@ docker stats
 - El HTTP Flood apunta a `INTERNAL_BASE_URL` (por defecto `http://127.0.0.1:3000`).
 
 ## Integrantes
+JOSE DAVID JARAMILLO 2459558-3743
 
-Documentar nombres del grupo en el informe y repositorio Git.
