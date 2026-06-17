@@ -1,0 +1,39 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model StressLog {
+  id          Int      @id @default(autoincrement())
+  timestamp   DateTime @default(now())
+  stressType  String   @map("stress_type")
+  intensity   Float
+  durationMs  Int      @map("duration_ms")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("stress_logs")
+}
+
+model MetricsSnapshot {
+  id                Int      @id @default(autoincrement())
+  cpuPercent        Float    @map("cpu_percent")
+  ramUsedMb         Float    @map("ram_used_mb")
+  activeConnections Int      @map("active_connections")
+  timestamp         DateTime @default(now())
+
+  @@map("metrics_snapshots")
+}
+
+model StressData {
+  id           Int      @id @default(autoincrement())
+  payload      String   // Texto de ~1KB para forzar I/O y memoria
+  randomNumber Int      @map("random_number")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([randomNumber]) // Indexamos uno para forzar búsquedas secuenciales intencionales en otros campos sin índice
+  @@map("stress_data")
+}

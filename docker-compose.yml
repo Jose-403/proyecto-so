@@ -1,0 +1,65 @@
+# Para agregar este servicio al docker-compose.yml existente del laboratorio,
+# copie el bloque "stress_monitor" al final de la sección services:
+#
+#   stress_monitor:
+#     build:
+#       context: ./stress-monitor
+#       dockerfile: Dockerfile
+#     ports:
+#       - "3001:3000"
+#     environment:
+#       DATABASE_URL: postgresql://postgres:postgres_stress_pass@postgres_db:5432/stress_db?schema=public
+#       INTERNAL_BASE_URL: http://127.0.0.1:3000
+#       STRESS_MAX_MEMORY_MB: 2048
+#     volumes:
+#       - /proc:/host/proc:ro
+#     depends_on:
+#       postgres_db:
+#         condition: service_healthy
+#     networks:
+#       - default
+
+version: '3.8'
+
+services:
+  stress_monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stress_monitor
+    ports:
+      - "3001:3000"
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres_stress_pass@postgres_db:5432/stress_db?schema=public
+      INTERNAL_BASE_URL: http://127.0.0.1:3000
+      STRESS_MAX_MEMORY_MB: 2048
+    volumes:
+      - /proc:/host/proc:ro
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 3000M
+
+  postgres_db:
+    image: postgres:16-alpine
+    container_name: postgres_db
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_stress_pass
+      POSTGRES_DB: stress_db
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
