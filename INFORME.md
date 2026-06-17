@@ -6,6 +6,7 @@ Escuela de Ingeniería de Sistemas y Computación, Universidad del Valle, Cali, 
 
 **Asignatura:** Sistemas Operativos · **Junio 2026**  
 **Repositorio:** https://github.com/Jose-403/proyecto-so
+**Video:** https://youtu.be/oh-OdahI9pI?si=pTKgCKkK5q1Ljlzj
 
 ---
 
